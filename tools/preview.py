@@ -197,33 +197,47 @@ def render_picker():
     return img
 
 
+DOCS = os.path.join(HERE, os.pardir, "docs")
+
+
+def scene(tile, kind, zoom=1, pad=12):
+    """Puts a rendered tile on a game-like backdrop with some breathing room."""
+    if zoom > 1:
+        tile = tile.resize((tile.width * zoom, tile.height * zoom), Image.NEAREST)
+    bg = backdrop(tile.width + pad * 2, tile.height + pad * 2, kind)
+    bg.alpha_composite(tile, (pad, pad))
+    return bg.convert("RGB")
+
+
 def main():
-    w, h = 272, 48
+    os.makedirs(DOCS, exist_ok=True)
+    w, h = 272, 44
     tile, box = render_dock(w, h)
-    layer = Image.fromarray(np.clip(tile * 255, 0, 255).astype(np.uint8), "RGBA")
-    draw_letters(layer, box)
+    dock = Image.fromarray(np.clip(tile * 255, 0, 255).astype(np.uint8), "RGBA")
+    draw_letters(dock, box)
     picker = render_picker()
 
-    scene_h = picker.height + h + 16
-    sheet = Image.new("RGB", (max(w * 2, picker.width + 32) + 16,
-                              h + 8 + h * 2 + 8 + scene_h + 24), (18, 18, 20))
-    for col, kind in enumerate(("dark", "light")):
-        bg = backdrop(w, h, kind)
-        bg.alpha_composite(layer)
-        sheet.paste(bg.convert("RGB"), (8 + col * (w + 8), 8))
+    # Hero: the dock at 3x so the shading and the active marker are legible.
+    scene(dock, "dark", zoom=3, pad=18).save(os.path.join(DOCS, "dock.png"))
 
-    big = layer.resize((w * 2, h * 2), Image.NEAREST)
-    bg = backdrop(w * 2, h * 2, "dark")
-    bg.alpha_composite(big)
-    sheet.paste(bg.convert("RGB"), (8, 16 + h))
+    # True size, on a dark and on a bright background.
+    left, right = scene(dock, "dark"), scene(dock, "light")
+    sizes = Image.new("RGB", (left.width + right.width + 8, left.height), (18, 18, 20))
+    sizes.paste(left, (0, 0))
+    sizes.paste(right, (left.width + 8, 0))
+    sizes.save(os.path.join(DOCS, "sizes.png"))
 
-    # The picker as it appears above the dock, with the emote orb hovered.
-    scene = backdrop(picker.width + 32, scene_h, "dark")
-    scene.alpha_composite(picker, (16, 0))
-    scene.alpha_composite(layer, (16 + picker.width // 2 - w // 2, picker.height + 8))
-    sheet.paste(scene.convert("RGB"), (8, 24 + h + h * 2))
-    sheet.save(os.path.join(HERE, "preview_dock.png"))
-    print("wrote tools/preview_dock.png — all five BLPs decoded and composited")
+    # The emote list as it opens above the dock.
+    combo = Image.new("RGBA", (max(picker.width, dock.width),
+                               picker.height + dock.height + 8), (0, 0, 0, 0))
+    combo.alpha_composite(picker, ((combo.width - picker.width) // 2, 0))
+    combo.alpha_composite(dock, ((combo.width - dock.width) // 2, picker.height + 8))
+    scene(combo, "dark", zoom=2, pad=18).save(os.path.join(DOCS, "emotes.png"))
+
+    for name in ("dock", "sizes", "emotes"):
+        path = os.path.join(DOCS, name + ".png")
+        print("wrote docs/%s.png  %dx%d" % ((name,) + Image.open(path).size))
+    print("all five BLPs decoded and composited")
 
 
 if __name__ == "__main__":

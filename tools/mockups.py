@@ -309,8 +309,10 @@ def main():
     y += 24
 
     sheet = sheet.crop((0, 0, width, y)).convert("RGB")
-    sheet.save(os.path.join(HERE, "mockups.png"))
-    print("wrote tools/mockups.png  %dx%d" % sheet.size)
+    docs = os.path.join(HERE, os.pardir, "docs")
+    os.makedirs(docs, exist_ok=True)
+    sheet.save(os.path.join(docs, "variants.png"))
+    print("wrote docs/variants.png  %dx%d" % sheet.size)
 
 
 if __name__ == "__main__":

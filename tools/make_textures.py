@@ -1,210 +1,158 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Generates ChatBar/Textures/Orb.* and OrbGloss.* from the reference screenshot.
+Generates ChatOrbs/Textures/*.blp.
 
-The nine orbs on the reference panel are rendered by the game as
+Everything here is drawn from scratch: no source artwork, no screenshots.
+Each texture is written as BLP2 (type 1, palettised, 8-bit alpha, full mip
+chain), which is the uncompressed variant every WoW client reads.
 
-    pixel = A(x,y) * tint  +  B(x,y)
+    Orb       greyscale sphere + ring, tinted with the chat colour
+    OrbSheen  white top wash, drawn over the orb with normal blending
+    Glow      soft radial glow, tinted, drawn additively on hover
+    Panel     nine-slice rounded panel for the dock and the emote popup
+    Marker    rounded pill marking the active channel
 
-where A is a neutral (grey) sphere that IS tinted by the chat-type colour and
-B is a gold rim + specular gloss that is NOT tinted.  Because the screenshot
-contains nine orbs with nine *known* tints (the default ChatTypeInfo colours),
-A and B can be recovered per-pixel by least squares and baked into two
-textures:
-
-    Orb       -- greyscale sphere, drawn with SetVertexColor(chat colour)
-    OrbGloss  -- gold rim + gloss, drawn untinted with blend mode "ADD"
-
-Both are written as BLP2 (palettised, 8-bit alpha, full mip chain) for modern
-clients and as uncompressed 32-bit TGA for pre-Legion clients.
+The orb is split in two because SetVertexColor can only darken: the ring and
+the vertical falloff are multiplies and live in Orb, while the highlight has
+to lighten and therefore needs its own layer.
 """
 
 import os
 import struct
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(HERE, os.pardir, "ChatBar", "Textures")
-
-# --- reference screenshot geometry (measured, see README) --------------------
-SCREENSHOT = os.environ.get(
-    "CHATBAR_REF",
-    "/tmp/claude-0/-home-user-ChatBar-WoW-Forever/"
-    "2487288f-a1f5-57cf-82bc-4f17b65c0713/images/1.png",
-)
-
-ORB_CENTERS_X = [83.0, 108.5, 134.5, 161.0, 187.0, 212.5, 238.5, 264.0, 290.5]
-ORB_CENTER_Y = 86.3
-
-# Default ChatTypeInfo colours of the nine orbs, in screenshot order:
-# SAY, YELL, WHISPER, BN_WHISPER, EMOTE, CHANNEL x4
-TINTS = [
-    (1.00, 1.00, 1.00),
-    (1.00, 0.25, 0.25),
-    (1.00, 0.50, 1.00),
-    (0.00, 1.00, 0.96),
-    (1.00, 0.50, 0.25),
-    (1.00, 0.75, 0.75),
-    (1.00, 0.75, 0.75),
-    (1.00, 0.75, 0.75),
-    (1.00, 0.75, 0.75),
-]
-
-SPAN = 11.0        # texture covers +/- 11 screenshot px around the orb centre
-TEX = 64           # output texture size (power of two)
-R_SOLID = 9.2      # orb is fully opaque inside this radius (screenshot px)
-R_EDGE = 10.0      # ...and fully transparent outside this one
-BG = 11.0          # near-black backdrop behind the panel in the screenshot
-CLIP = 250.0       # observations at/above this are clipped -> unusable
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       os.pardir, "ChatOrbs", "Textures")
+SS = 8                      # supersampling factor
 
 
 # ---------------------------------------------------------------------------
-# sampling
+# drawing helpers
 # ---------------------------------------------------------------------------
-def sample(img, cx, cy):
-    """Bilinearly sample a TEXxTEX patch of +/-SPAN px around (cx, cy)."""
-    h, w, _ = img.shape
-    # pixel centres of the output grid, in screenshot coordinates
-    t = (np.arange(TEX) + 0.5) / TEX * (2 * SPAN) - SPAN
-    xs = cx + t
-    ys = cy + t
-    gx, gy = np.meshgrid(xs, ys)
-
-    x0 = np.clip(np.floor(gx).astype(int), 0, w - 2)
-    y0 = np.clip(np.floor(gy).astype(int), 0, h - 2)
-    fx = (gx - x0)[..., None]
-    fy = (gy - y0)[..., None]
-
-    return (
-        img[y0, x0] * (1 - fx) * (1 - fy)
-        + img[y0, x0 + 1] * fx * (1 - fy)
-        + img[y0 + 1, x0] * (1 - fx) * fy
-        + img[y0 + 1, x0 + 1] * fx * fy
-    )
+def canvas(w, h):
+    return Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
 
 
-def gaussian_blur(a, sigma):
-    """Separable Gaussian blur with edge clamping (no scipy dependency)."""
-    radius = max(1, int(round(3 * sigma)))
-    k = np.exp(-0.5 * (np.arange(-radius, radius + 1) / sigma) ** 2)
-    k /= k.sum()
-    out = a.astype(float)
-    for axis in (0, 1):
-        padded = np.apply_along_axis(
-            lambda m: np.pad(m, radius, mode="edge"), axis, out
-        )
-        out = np.apply_along_axis(lambda m: np.convolve(m, k, mode="valid"), axis, padded)
-    return out
+def shrink(img, w, h):
+    return img.resize((w, h), Image.LANCZOS)
 
 
-def decompose():
-    """Recover the tinted sphere A and the untinted gloss B."""
-    img = np.asarray(Image.open(SCREENSHOT).convert("RGB")).astype(float)
+def to_array(img):
+    return np.asarray(img).astype(float) / 255.0
 
-    obs = np.stack([sample(img, cx, ORB_CENTER_Y) for cx in ORB_CENTERS_X])
-    obs = np.clip(obs - BG, 0.0, None)          # (9, TEX, TEX, 3)
-    usable = obs < (CLIP - BG)
 
-    tints = np.asarray(TINTS)                   # (9, 3)
-
-    # Unknowns per pixel: x = [A, Br, Bg, Bb].
-    # Each observation obs[i, c] contributes the row [tint[i, c], e_c].
-    rows = []
-    for i in range(len(TINTS)):
-        for c in range(3):
-            r = np.zeros(4)
-            r[0] = tints[i, c]
-            r[1 + c] = 1.0
-            rows.append(r)
-    design = np.asarray(rows)                   # (27, 4)
-
-    flat_obs = obs.transpose(1, 2, 0, 3).reshape(TEX * TEX, 27)
-    flat_use = usable.transpose(1, 2, 0, 3).reshape(TEX * TEX, 27)
-
-    solution = np.zeros((TEX * TEX, 4))
-    # Group pixels by which observations are usable: only a handful of distinct
-    # masks exist, so one pseudo-inverse per mask solves every pixel at once.
-    masks, inverse = np.unique(flat_use, axis=0, return_inverse=True)
-    for mi, mask in enumerate(masks):
-        if mask.sum() < 4:
-            continue
-        sel = inverse == mi
-        pinv = np.linalg.pinv(design[mask])
-        solution[sel] = flat_obs[sel][:, mask] @ pinv.T
-
-    solution = solution.reshape(TEX, TEX, 4)
-    a = np.clip(solution[..., 0], 0.0, None)
-    b = np.clip(solution[..., 1:], 0.0, None)
-
-    # The screenshot is lossy, so smooth away the per-pixel noise, then undo
-    # part of the screenshot's own blur with a gentle unsharp mask.  sigma is
-    # in texture pixels; TEX/(2*SPAN) ~= 2.9 texels per screenshot pixel.
-    def clean(plane):
-        plane = gaussian_blur(plane, 1.1)
-        return np.clip(plane + 0.55 * (plane - gaussian_blur(plane, 2.6)), 0.0, None)
-
-    a = clean(a)
-    b = np.stack([clean(b[..., c]) for c in range(3)], axis=-1)
-    return a, b
+def from_array(arr):
+    return Image.fromarray(np.clip(arr * 255.0, 0, 255).astype(np.uint8), "RGBA")
 
 
 # ---------------------------------------------------------------------------
-# layer -> RGBA
+# Orb: greyscale, tinted by the chat colour
 # ---------------------------------------------------------------------------
-def radius_grid():
-    t = (np.arange(TEX) + 0.5) / TEX * (2 * SPAN) - SPAN
-    gx, gy = np.meshgrid(t, t)
-    return np.sqrt(gx * gx + gy * gy)
+def make_orb(size=64, ring=0.38, top=1.0, bottom=0.84, ring_width=0.13):
+    """Vertical falloff inside, a darker ring at the rim, alpha for the edge."""
+    axis = (np.arange(size) + 0.5) / size * 2.0 - 1.0
+    gx, gy = np.meshgrid(axis, axis)
+    r = np.sqrt(gx * gx + gy * gy)
 
+    fill = top + (bottom - top) * ((gy + 1.0) / 2.0)
 
-def build_orb(a):
-    """Greyscale sphere: RGB carries the shading, alpha the silhouette."""
-    r = radius_grid()
-    alpha = np.clip((R_EDGE - r) / (R_EDGE - R_SOLID), 0.0, 1.0)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rgb = np.where(alpha > 1e-3, a / 255.0 / np.maximum(alpha, 1e-3), 0.0)
-    rgb = np.clip(rgb, 0.0, 1.0)
-    out = np.zeros((TEX, TEX, 4))
-    out[..., 0] = out[..., 1] = out[..., 2] = rgb
+    # Blend from the fill into the ring across a narrow band, so the rim does
+    # not alias once the 64px texture is drawn at 20px.
+    inner = 1.0 - ring_width
+    t = np.clip((r - inner) / max(ring_width * 0.55, 1e-6), 0.0, 1.0)
+    value = fill * (1.0 - t) + ring * t
+
+    alpha = np.clip((1.0 - r) / (1.6 / (size / 2.0)), 0.0, 1.0)
+
+    out = np.zeros((size, size, 4))
+    out[..., 0] = out[..., 1] = out[..., 2] = value
     out[..., 3] = alpha
     return out
 
 
-def build_gloss(b):
-    """Gold rim + specular highlight, premultiplied into RGB x alpha."""
-    alpha = np.clip(b.max(axis=-1) / 255.0, 0.0, 1.0)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rgb = np.where(
-            alpha[..., None] > 1e-3,
-            b / 255.0 / np.maximum(alpha[..., None], 1e-3),
-            0.0,
-        )
-    rgb = np.clip(rgb, 0.0, 1.0)
-    out = np.zeros((TEX, TEX, 4))
-    out[..., :3] = rgb
-    out[..., 3] = alpha
-    return out
+# ---------------------------------------------------------------------------
+# OrbSheen: white wash over the upper half, clipped to the orb
+# ---------------------------------------------------------------------------
+def make_sheen(size=64, strength=0.62):
+    layer = Image.new("RGBA", (size * SS, size * SS), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    px = size * SS
+    d.ellipse((px * 0.17, px * 0.04, px * 0.83, px * 0.47),
+              fill=(255, 255, 255, int(255 * strength)))
+    layer = layer.filter(ImageFilter.GaussianBlur(px * 0.065))
+
+    mask = Image.new("L", (px, px), 0)
+    ImageDraw.Draw(mask).ellipse((px * 0.055, px * 0.055, px * 0.945, px * 0.945),
+                                 fill=255)
+    mask = mask.filter(ImageFilter.GaussianBlur(px * 0.012))
+    clipped = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    clipped.paste(layer, (0, 0), mask)
+
+    arr = to_array(shrink(clipped, size, size))
+    arr[..., :3] = 1.0                      # keep RGB pure white
+    return arr
 
 
-def to_u8(rgba):
-    return np.clip(np.round(rgba * 255.0), 0, 255).astype(np.uint8)
+# ---------------------------------------------------------------------------
+# Glow: soft halo drawn additively behind a hovered orb
+# ---------------------------------------------------------------------------
+def make_glow(size=64, inner=0.30, blur=0.11):
+    px = size * SS
+    layer = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).ellipse(
+        (px * inner, px * inner, px * (1 - inner), px * (1 - inner)),
+        fill=(255, 255, 255, 255))
+    layer = layer.filter(ImageFilter.GaussianBlur(px * blur))
+    arr = to_array(shrink(layer, size, size))
+    arr[..., :3] = 1.0
+    return arr
+
+
+# ---------------------------------------------------------------------------
+# Panel: nine-slice rounded rectangle, dark fill with a light hairline
+# ---------------------------------------------------------------------------
+def make_panel(size=64, radius=20, fill=(13, 13, 16, 205),
+               border=(255, 255, 255, 40), border_w=2.4, sheen=(255, 255, 255, 26)):
+    px = size * SS
+    layer = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    d.rounded_rectangle((0, 0, px - 1, px - 1), radius=radius * SS, fill=fill)
+    d.rounded_rectangle((border_w * SS / 2, border_w * SS / 2,
+                         px - 1 - border_w * SS / 2, px - 1 - border_w * SS / 2),
+                        radius=radius * SS, outline=border, width=int(border_w * SS))
+    # A hairline of light along the top edge, inside the border.
+    d.rounded_rectangle((radius * SS * 0.5, border_w * SS * 1.4,
+                         px - 1 - radius * SS * 0.5, border_w * SS * 3.2),
+                        radius=border_w * SS, fill=sheen)
+    return to_array(shrink(layer, size, size))
+
+
+# ---------------------------------------------------------------------------
+# Marker: small rounded pill under the active channel
+# ---------------------------------------------------------------------------
+def make_marker(w=32, h=8):
+    layer = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rounded_rectangle(
+        (0, 0, w * SS - 1, h * SS - 1), radius=h * SS / 2, fill=(255, 255, 255, 255))
+    arr = to_array(shrink(layer, w, h))
+    arr[..., :3] = 1.0
+    return arr
 
 
 # ---------------------------------------------------------------------------
 # mip chain
 # ---------------------------------------------------------------------------
 def mip_chain(rgba_u8):
-    """Box-filtered mip chain, averaged in premultiplied space."""
     levels = [rgba_u8]
     cur = rgba_u8.astype(float)
-    while cur.shape[0] > 1:
-        n = cur.shape[0] // 2
+    while min(cur.shape[0], cur.shape[1]) > 1:
+        h, w = max(1, cur.shape[0] // 2), max(1, cur.shape[1] // 2)
         alpha = cur[..., 3:4] / 255.0
         prem = np.concatenate([cur[..., :3] * alpha, cur[..., 3:4]], axis=-1)
-        prem = prem.reshape(n, 2, n, 2, 4).mean(axis=(1, 3))
+        prem = prem.reshape(h, cur.shape[0] // h, w, cur.shape[1] // w, 4).mean(axis=(1, 3))
         alpha = prem[..., 3:4] / 255.0
         rgb = np.where(alpha > 1e-4, prem[..., :3] / np.maximum(alpha, 1e-4), 0.0)
         cur = np.concatenate([rgb, prem[..., 3:4]], axis=-1)
@@ -220,8 +168,8 @@ def build_palette(levels, greyscale):
         return [(i, i, i) for i in range(256)]
     rgb = np.concatenate([lv[..., :3].reshape(-1, 3) for lv in levels])
     img = Image.fromarray(rgb.reshape(1, -1, 3).astype(np.uint8), "RGB")
-    pal_img = img.quantize(colors=256, method=Image.MEDIANCUT, dither=Image.NONE)
-    raw = pal_img.getpalette()[: 256 * 3]
+    quantized = img.quantize(colors=256, method=Image.MEDIANCUT, dither=Image.NONE)
+    raw = quantized.getpalette()[: 256 * 3]
     pal = [tuple(raw[i * 3: i * 3 + 3]) for i in range(len(raw) // 3)]
     while len(pal) < 256:
         pal.append((0, 0, 0))
@@ -246,59 +194,44 @@ def write_blp(path, levels, greyscale):
     header_size = 148 + 256 * 4
     offsets, sizes, cursor = [0] * 16, [0] * 16, header_size
     for i, data in enumerate(mips[:16]):
-        offsets[i] = cursor
-        sizes[i] = len(data)
+        offsets[i], sizes[i] = cursor, len(data)
         cursor += len(data)
 
     out = bytearray()
     out += b"BLP2"
-    out += struct.pack("<I", 1)                      # type: direct (not JPEG)
-    out += struct.pack("<BBBB", 1, 8, 0, 1)          # encoding, alphaDepth,
-    #                                                  alphaEncoding, hasMips
+    out += struct.pack("<I", 1)                   # type: direct colour
+    out += struct.pack("<BBBB", 1, 8, 0, 1)       # encoding, alphaDepth,
+    #                                               alphaEncoding, hasMips
     out += struct.pack("<II", levels[0].shape[1], levels[0].shape[0])
     out += struct.pack("<16I", *offsets)
     out += struct.pack("<16I", *sizes)
     for r, g, b in pal:
-        out += struct.pack("<BBBB", b, g, r, 0)      # palette is BGRA
+        out += struct.pack("<BBBB", b, g, r, 0)   # palette entries are BGRA
     assert len(out) == header_size, len(out)
     for data in mips[:16]:
         out += data
 
     with open(path, "wb") as fh:
         fh.write(bytes(out))
-    return bytes(out)
-
-
-def write_tga(path, rgba_u8):
-    """Uncompressed 32-bit TGA, bottom-up, for pre-Legion clients."""
-    h, w, _ = rgba_u8.shape
-    out = bytearray()
-    out += struct.pack("<BBBHHBHHHHBB", 0, 0, 2, 0, 0, 0, 0, 0, w, h, 32, 0x08)
-    for y in range(h - 1, -1, -1):
-        row = rgba_u8[y]
-        bgra = row[:, [2, 1, 0, 3]]
-        out += bgra.tobytes()
-    with open(path, "wb") as fh:
-        fh.write(bytes(out))
+    return len(out)
 
 
 # ---------------------------------------------------------------------------
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
-    a, b = decompose()
-
-    for name, rgba, grey in (
-        ("Orb", build_orb(a), True),
-        ("OrbGloss", build_gloss(b), False),
-    ):
-        u8 = to_u8(rgba)
+    textures = [
+        ("Orb",      make_orb(),     True),
+        ("OrbSheen", make_sheen(),   True),
+        ("Glow",     make_glow(),    True),
+        ("Panel",    make_panel(),   False),
+        ("Marker",   make_marker(),  True),
+    ]
+    for name, arr, greyscale in textures:
+        u8 = np.clip(np.round(arr * 255.0), 0, 255).astype(np.uint8)
         levels = mip_chain(u8)
-        blp = write_blp(os.path.join(OUT_DIR, name + ".blp"), levels, grey)
-        write_tga(os.path.join(OUT_DIR, name + ".tga"), u8)
-        print(
-            "%-9s %dx%d  %d mips  blp=%d bytes  tga=%d bytes"
-            % (name, TEX, TEX, len(levels), len(blp), TEX * TEX * 4 + 18)
-        )
+        written = write_blp(os.path.join(OUT_DIR, name + ".blp"), levels, greyscale)
+        print("%-9s %dx%d  %d mips  %d bytes"
+              % (name, u8.shape[1], u8.shape[0], len(levels), written))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+## Interface: 16001, 120100, 120105
+## Title: ChatOrbs
+## Version: 1.0.0
+## Author: hadesboy7
+## Notes: Compact dock of chat channel buttons with a one-click emote list.
+## Notes-ruRU: Компактная панель каналов чата с выбором эмоций в один щелчок.
+## SavedVariables: ChatOrbsDB
+## DefaultState: enabled
+## X-Category: Chat & Communication
+## X-License: MIT
+
+ChatOrbs.lua

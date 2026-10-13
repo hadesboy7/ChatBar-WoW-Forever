@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Decodes the generated BLPs and composites the dock exactly the way the addon
+will: nine-slice panel, tinted orb, sheen over it with normal blending, glow
+added underneath on hover, marker under the active channel.
+
+Doubles as a check on the BLP writer - the decoder here is written from the
+format spec rather than sharing code with the encoder.
+"""
+
+import os
+import struct
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+TEX = os.path.join(HERE, os.pardir, "ChatOrbs", "Textures")
+
+ORB, STEP, INNER, CORNER = 20, 26, 6, 12
+FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+CHANNELS = [
+    ("С", (1.00, 1.00, 1.00)), ("К", (1.00, 0.25, 0.25)),
+    ("Э", (1.00, 0.50, 0.25)), ("Ш", (1.00, 0.50, 1.00)),
+    ("Г", (0.67, 0.67, 1.00)), ("Р", (1.00, 0.50, 0.00)),
+    ("Г", (0.25, 1.00, 0.25)), ("О", (1.00, 0.75, 0.75)),
+    ("Т", (1.00, 0.75, 0.75)),
+]
+HOVER, ACTIVE = 1, 0
+
+
+def read_blp(name):
+    data = open(os.path.join(TEX, name + ".blp"), "rb").read()
+    assert data[:4] == b"BLP2"
+    kind, = struct.unpack_from("<I", data, 4)
+    encoding, alpha_depth, _alpha_enc, has_mips = struct.unpack_from("<BBBB", data, 8)
+    w, h = struct.unpack_from("<II", data, 12)
+    offsets = struct.unpack_from("<16I", data, 20)
+    sizes = struct.unpack_from("<16I", data, 84)
+    assert (kind, encoding, alpha_depth) == (1, 1, 8), (kind, encoding, alpha_depth)
+    assert has_mips == 1
+    assert offsets[0] == 148 + 1024 and sizes[0] == w * h * 2
+
+    levels = sum(1 for s in sizes if s)
+    ew, eh = w, h
+    for i in range(levels):
+        assert sizes[i] == ew * eh * 2, (name, i)
+        ew, eh = max(1, ew // 2), max(1, eh // 2)
+    assert offsets[levels - 1] + sizes[levels - 1] == len(data), name
+
+    palette = np.frombuffer(data, np.uint8, 1024, 148).reshape(256, 4)
+    idx = np.frombuffer(data, np.uint8, w * h, offsets[0]).reshape(h, w)
+    alpha = np.frombuffer(data, np.uint8, w * h, offsets[0] + w * h).reshape(h, w)
+    rgb = palette[idx][:, :, :3][:, :, ::-1]          # palette is BGRA
+    return np.dstack([rgb, alpha]).astype(float) / 255.0
+
+
+def resize(arr, w, h):
+    img = Image.fromarray(np.clip(arr * 255, 0, 255).astype(np.uint8), "RGBA")
+    return np.asarray(img.resize((w, h), Image.LANCZOS)).astype(float) / 255.0
+
+
+def blend(dst, src, x, y, mode="BLEND", tint=(1, 1, 1), alpha=1.0):
+    h, w = src.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(dst.shape[1], x + w), min(dst.shape[0], y + h)
+    if x1 <= x0 or y1 <= y0:
+        return
+    patch = src[y0 - y:y1 - y, x0 - x:x1 - x]
+    a = patch[..., 3:4] * alpha
+    colour = patch[..., :3] * np.asarray(tint)
+    region = dst[y0:y1, x0:x1]
+    if mode == "ADD":
+        region[..., :3] = np.clip(region[..., :3] + colour * a, 0, 1)
+    else:
+        region[..., :3] = region[..., :3] * (1 - a) + colour * a
+    region[..., 3:4] = np.clip(region[..., 3:4] + a * (1 - region[..., 3:4]), 0, 1)
+
+
+def nine_slice(dst, tex, x, y, w, h, corner=CORNER):
+    """Draws `tex` as a nine-slice box, matching the Lua layout exactly."""
+    tw = tex.shape[1]
+    cut = int(round(tw * corner / (corner * 2 + 8)))   # texture px per corner
+    mid_t = tex[cut:tw - cut, cut:tw - cut]
+    mw, mh = w - 2 * corner, h - 2 * corner
+    pieces = [
+        (tex[:cut, :cut], x, y, corner, corner),
+        (tex[:cut, cut:tw - cut], x + corner, y, mw, corner),
+        (tex[:cut, tw - cut:], x + w - corner, y, corner, corner),
+        (tex[cut:tw - cut, :cut], x, y + corner, corner, mh),
+        (mid_t, x + corner, y + corner, mw, mh),
+        (tex[cut:tw - cut, tw - cut:], x + w - corner, y + corner, corner, mh),
+        (tex[tw - cut:, :cut], x, y + h - corner, corner, corner),
+        (tex[tw - cut:, cut:tw - cut], x + corner, y + h - corner, mw, corner),
+        (tex[tw - cut:, tw - cut:], x + w - corner, y + h - corner, corner, corner),
+    ]
+    for piece, px, py, pw, ph in pieces:
+        if pw > 0 and ph > 0:
+            blend(dst, resize(piece, pw, ph), px, py)
+
+
+def render_dock(w, h):
+    orb = read_blp("Orb")
+    sheen = read_blp("OrbSheen")
+    glow = read_blp("Glow")
+    panel = read_blp("Panel")
+    marker = read_blp("Marker")
+
+    dock_w = (len(CHANNELS) - 1) * STEP + ORB + 2 * INNER
+    dock_h = ORB + 2 * INNER
+    out = np.zeros((h, w, 4))
+    ox, oy = (w - dock_w) // 2, (h - dock_h) // 2
+
+    nine_slice(out, panel, ox, oy, dock_w, dock_h)
+
+    for i, (letter, colour) in enumerate(CHANNELS):
+        cx = ox + INNER + i * STEP + ORB // 2
+        cy = oy + INNER + ORB // 2
+        hovered = i == HOVER
+        size = ORB + (2 if hovered else 0)
+
+        if hovered:
+            g = 34
+            blend(out, resize(glow, g, g), cx - g // 2, cy - g // 2,
+                  mode="ADD", tint=colour, alpha=0.5)
+
+        blend(out, resize(orb, size, size), cx - size // 2, cy - size // 2,
+              tint=colour)
+        blend(out, resize(sheen, size, size), cx - size // 2, cy - size // 2,
+              alpha=0.30 if hovered else 0.20)
+
+        if i == ACTIVE:
+            mw, mh = 14, 3
+            blend(out, resize(marker, mw, mh), cx - mw // 2,
+                  oy + dock_h - INNER + 1, tint=colour, alpha=0.95)
+    return out, (ox, oy, dock_w, dock_h)
+
+
+def draw_letters(img, box):
+    ox, oy, _dw, _dh = box
+    d = ImageDraw.Draw(img)
+    font = ImageFont.truetype(FONT_BOLD, 11)
+    for i, (letter, colour) in enumerate(CHANNELS):
+        cx = ox + INNER + i * STEP + ORB // 2
+        cy = oy + INNER + ORB // 2
+        l, t, r, b = d.textbbox((0, 0), letter, font=font)
+        d.text((cx - (r + l) / 2, cy - (b + t) / 2 - 0.5), letter, font=font,
+               fill=tuple(int(c * 255 * 0.20) for c in colour) + (250,))
+
+
+def backdrop(w, h, kind):
+    y = np.linspace(0, 1, h)[:, None]
+    x = np.linspace(0, 1, w)[None, :]
+    one = np.ones((h, w))
+    if kind == "dark":
+        base = np.stack([28 + 26 * y + 14 * x, 21 + 17 * y + 9 * x,
+                         15 + 11 * y + 6 * x], -1) * one[..., None]
+    else:
+        base = np.stack([(118 + 62 * (1 - y)) * one, (132 + 60 * (1 - y)) * one,
+                         (108 + 50 * (1 - y)) * one], -1)
+    base = base + np.random.default_rng(7).normal(0, 3.2, base.shape)
+    return Image.fromarray(np.clip(base, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
+
+
+EMOTES = ["Привет", "Пока", "Помахать", "Поклон", "Отдатьчесть", "Спасибо",
+          "Аплодисменты", "Ура", "Смех", "Улыбка", "Танец", "Мускулы",
+          "Поцелуй", "Обнять", "Пожатьплечами", "Извинить", "Плакать",
+          "Рычать", "Спать", "Да", "Нет"]
+COLS, CELL_W, CELL_H, PAD = 3, 120, 20, 10
+
+
+def render_picker():
+    """The emote list, laid out exactly as the addon lays it out."""
+    panel = read_blp("Panel")
+    rows = (len(EMOTES) + COLS - 1) // COLS
+    w = COLS * CELL_W + PAD * 2
+    h = rows * CELL_H + PAD * 2
+    out = np.zeros((h, w, 4))
+    nine_slice(out, panel, 0, 0, w, h)
+
+    img = Image.fromarray(np.clip(out * 255, 0, 255).astype(np.uint8), "RGBA")
+    d = ImageDraw.Draw(img)
+    font = ImageFont.truetype(FONT_BOLD, 11)
+    for i, label in enumerate(EMOTES):
+        col, row = i % COLS, i // COLS
+        x = PAD + col * CELL_W
+        y = PAD + row * CELL_H
+        if i == 10:                                  # one row shown hovered
+            d.rectangle((x + 2, y, x + CELL_W - 2, y + CELL_H - 1),
+                        fill=(255, 255, 255, 31))
+            colour = (255, 217, 89, 255)
+        else:
+            colour = (224, 224, 235, 255)
+        d.text((x + 8, y + CELL_H / 2 - 7), label, font=font, fill=colour)
+    return img
+
+
+def main():
+    w, h = 272, 48
+    tile, box = render_dock(w, h)
+    layer = Image.fromarray(np.clip(tile * 255, 0, 255).astype(np.uint8), "RGBA")
+    draw_letters(layer, box)
+    picker = render_picker()
+
+    scene_h = picker.height + h + 16
+    sheet = Image.new("RGB", (max(w * 2, picker.width + 32) + 16,
+                              h + 8 + h * 2 + 8 + scene_h + 24), (18, 18, 20))
+    for col, kind in enumerate(("dark", "light")):
+        bg = backdrop(w, h, kind)
+        bg.alpha_composite(layer)
+        sheet.paste(bg.convert("RGB"), (8 + col * (w + 8), 8))
+
+    big = layer.resize((w * 2, h * 2), Image.NEAREST)
+    bg = backdrop(w * 2, h * 2, "dark")
+    bg.alpha_composite(big)
+    sheet.paste(bg.convert("RGB"), (8, 16 + h))
+
+    # The picker as it appears above the dock, with the emote orb hovered.
+    scene = backdrop(picker.width + 32, scene_h, "dark")
+    scene.alpha_composite(picker, (16, 0))
+    scene.alpha_composite(layer, (16 + picker.width // 2 - w // 2, picker.height + 8))
+    sheet.paste(scene.convert("RGB"), (8, 24 + h + h * 2))
+    sheet.save(os.path.join(HERE, "preview_dock.png"))
+    print("wrote tools/preview_dock.png — all five BLPs decoded and composited")
+
+
+if __name__ == "__main__":
+    main()

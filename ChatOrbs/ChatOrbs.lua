@@ -28,8 +28,10 @@ local CAPTION_SIZE = 12
 local HOVER_TIME = 0.10         -- seconds for the hover transition
 
 local TEX = "Interface\\AddOns\\ChatOrbs\\Textures\\"
-local TEX_ORB, TEX_SHEEN = TEX .. "Orb", TEX .. "OrbSheen"
-local TEX_GLOW, TEX_PANEL, TEX_MARKER = TEX .. "Glow", TEX .. "Panel", TEX .. "Marker"
+-- Paths carry the extension so the client has nothing to guess.
+local TEX_ORB, TEX_SHEEN = TEX .. "Orb.blp", TEX .. "OrbSheen.blp"
+local TEX_GLOW = TEX .. "Glow.blp"
+local TEX_PANEL, TEX_MARKER = TEX .. "Panel.blp", TEX .. "Marker.blp"
 
 -- Nine-slice texture coordinates: 24px corners in a 64px texture.
 local SLICE = { 0, 0.375, 0.625, 1 }
@@ -217,6 +219,24 @@ local STATIC_ENTRIES = {
       label = { "OFFICER" },        available = InGuild,      fallback = "Officer" },
 }
 
+-- On the ruRU client some of these globals do not start with the letter
+-- players know the channel by: SAY comes out as Р, and the Battle.net whisper
+-- as О, which then collides with Офицерский and Общий. The chat edit box
+-- itself says "Сказать", so for Russian the captions follow the edit box
+-- rather than the global. Every other locale derives them as before.
+local RU_LABELS = {
+    SAY           = { "С", "Сказать" },
+    YELL          = { "К", "Крик" },
+    EMOTE         = { "Э", "Эмоция" },
+    WHISPER       = { "Ш", "Шепот" },
+    BN_WHISPER    = { "Ш", "Шепот Battle.net" },
+    PARTY         = { "Г", "Группа" },
+    RAID          = { "Р", "Рейд" },
+    INSTANCE_CHAT = { "П", "Подземелье" },
+    GUILD         = { "Г", "Гильдия" },
+    OFFICER       = { "О", "Офицерский" },
+}
+
 -- ---------------------------------------------------------------------------
 -- Chat edit box
 -- ---------------------------------------------------------------------------
@@ -350,6 +370,11 @@ local function BuildEntries()
     for _, def in ipairs(STATIC_ENTRIES) do
         if (not def.available) or def.available() then
             local title = Global(def.fallback, unpack(def.label))
+            local caption = FirstChar(title)
+            local override = isRU and RU_LABELS[def.chatType]
+            if override then
+                caption, title = override[1], override[2]
+            end
             local slash
             for _, name in ipairs(def.slash) do
                 local value = _G[name]
@@ -362,7 +387,7 @@ local function BuildEntries()
                 key         = def.chatType,
                 chatType    = def.chatType,
                 colorKey    = def.chatType,
-                caption     = FirstChar(title),
+                caption     = caption,
                 title       = title,
                 slashText   = slash,
                 needsTarget = def.needsTarget,

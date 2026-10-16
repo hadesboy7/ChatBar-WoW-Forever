@@ -32,29 +32,17 @@ HOVER, ACTIVE = 1, 0
 
 
 def read_blp(name):
-    data = open(os.path.join(TEX, name + ".blp"), "rb").read()
-    assert data[:4] == b"BLP2"
-    kind, = struct.unpack_from("<I", data, 4)
-    encoding, alpha_depth, _alpha_enc, has_mips = struct.unpack_from("<BBBB", data, 8)
-    w, h = struct.unpack_from("<II", data, 12)
-    offsets = struct.unpack_from("<16I", data, 20)
-    sizes = struct.unpack_from("<16I", data, 84)
-    assert (kind, encoding, alpha_depth) == (1, 1, 8), (kind, encoding, alpha_depth)
-    assert has_mips == 1
-    assert offsets[0] == 148 + 1024 and sizes[0] == w * h * 2
-
-    levels = sum(1 for s in sizes if s)
-    ew, eh = w, h
-    for i in range(levels):
-        assert sizes[i] == ew * eh * 2, (name, i)
-        ew, eh = max(1, ew // 2), max(1, eh // 2)
-    assert offsets[levels - 1] + sizes[levels - 1] == len(data), name
-
-    palette = np.frombuffer(data, np.uint8, 1024, 148).reshape(256, 4)
-    idx = np.frombuffer(data, np.uint8, w * h, offsets[0]).reshape(h, w)
-    alpha = np.frombuffer(data, np.uint8, w * h, offsets[0] + w * h).reshape(h, w)
-    rgb = palette[idx][:, :, :3][:, :, ::-1]          # palette is BGRA
-    return np.dstack([rgb, alpha]).astype(float) / 255.0
+    """Decodes a shipped texture. Pillow's BLP reader is an implementation of
+    the format independent of the writer in tools/make_textures.py, so this
+    doubles as a check that the files are well formed."""
+    path = os.path.join(TEX, name + ".blp")
+    header = open(path, "rb").read(16)
+    assert header[:4] == b"BLP2", path
+    kind, = struct.unpack_from("<I", header, 4)
+    encoding, alpha_depth, alpha_encoding, has_mips = struct.unpack_from("<BBBB", header, 8)
+    assert (kind, encoding, alpha_depth, alpha_encoding, has_mips) == (1, 2, 8, 7, 1), \
+        ("%s is not BLP2/DXT5 with mips" % path)
+    return np.asarray(Image.open(path).convert("RGBA")).astype(float) / 255.0
 
 
 def resize(arr, w, h):

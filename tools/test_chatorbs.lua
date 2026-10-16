@@ -395,13 +395,13 @@ end
 local orb1 = textureOf(buttons()[1], "ARTWORK")
 check(orb1.color and orb1.color[1] == 1 and orb1.color[2] == 1,
       "the Say orb is not white")
-check(orb1.texture and orb1.texture:find("Orb$"), "the orb texture path is wrong")
+check(orb1.texture and orb1.texture:find("Orb%.blp$"), "the orb texture path is wrong")
 local cap1 = captionOf(buttons()[1])
 check(cap1.color and math.abs(cap1.color[1] - 0.20) < 1e-9,
       "the Say glyph is not a darkened white")
 
 local sheen1 = textureOf(buttons()[1], "OVERLAY")
-check(sheen1.texture and sheen1.texture:find("OrbSheen$"), "sheen texture path")
+check(sheen1.texture and sheen1.texture:find("OrbSheen%.blp$"), "sheen texture path")
 local glow1 = textureOf(buttons()[1], "BACKGROUND")
 check(glow1.blend == "ADD", "the glow is not additive")
 check(glow1.alpha == 0, "the glow is visible at rest")
@@ -416,7 +416,7 @@ local dockPanel = panelOf(dock)
 check(dockPanel ~= nil, "the dock has no nine-slice panel frame")
 local panelPieces, corners = 0, 0
 for _, r in ipairs(dockPanel.regions) do
-    if r.kind == "Texture" and r.texture and r.texture:find("Panel$") then
+    if r.kind == "Texture" and r.texture and r.texture:find("Panel%.blp$") then
         panelPieces = panelPieces + 1
         check(r.coords and #r.coords == 4, "a panel piece has no texcoords")
         -- Each of the four corners must sample a distinct corner of the atlas.
@@ -454,7 +454,7 @@ check(editBox.attributes.channelTarget == 2,
 -- The marker follows the active channel.
 local marker
 for _, r in ipairs(dock.regions) do
-    if r.kind == "Texture" and r.texture and r.texture:find("Marker$") then marker = r end
+    if r.kind == "Texture" and r.texture and r.texture:find("Marker%.blp$") then marker = r end
 end
 check(marker ~= nil, "the active-channel marker was not created")
 check(marker.shown, "the marker is hidden while a channel is active")
@@ -628,8 +628,31 @@ check(orbAfter.color and orbAfter.color[1] == 1, "flat mode lost the orb colour"
 click(1)
 run("flat")
 check(env.ChatOrbsDB.flat == false, "flat did not toggle back")
-check(textureOf(buttons()[1], "ARTWORK").texture:find("Orb$"),
+check(textureOf(buttons()[1], "ARTWORK").texture:find("Orb%.blp$"),
       "leaving flat mode did not restore the texture")
+
+-- ruRU captions must not follow the client globals where those start with the
+-- wrong letter. On the real client SAY reads as "Р..." and the Battle.net
+-- whisper as "О...", which is what the in-game screenshot showed.
+env.SAY = "Разговор"
+env.BN_WHISPER = "Ответить через Battle.net"
+fire("CHANNEL_UI_UPDATE")
+check(captions() == expected,
+      "odd ruRU globals leaked into the captions: '" .. captions() .. "'")
+local sayTooltip
+pcall(buttons()[1].scripts.OnEnter, buttons()[1])
+sayTooltip = tooltipLines[1]
+check(sayTooltip == "Сказать",
+      "the Say tooltip reads '" .. tostring(sayTooltip) .. "', expected 'Сказать'")
+pcall(buttons()[1].scripts.OnLeave, buttons()[1])
+
+env.SAY = "Сказать"
+env.BN_WHISPER = nil
+fire("CHANNEL_UI_UPDATE")
+-- Other locales still derive the letter from the client's own global. That
+-- path cannot be exercised by switching GetLocale here, because the addon
+-- reads the locale once at load, as the game does. It is covered by the
+-- channel captions, which are always derived from the channel name.
 
 -- Clicking with the chat helpers missing still reaches the slash fallback.
 env.ChatEdit_UpdateHeader = nil

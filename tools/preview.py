@@ -19,6 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TEX = os.path.join(HERE, os.pardir, "ChatOrbs", "Textures")
 
 ORB, STEP, INNER, CORNER = 20, 26, 6, 12
+MARKER = (14, 4)
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 CHANNELS = [
@@ -120,7 +121,7 @@ def render_dock(w, h):
               alpha=0.30 if hovered else 0.20)
 
         if i == ACTIVE:
-            mw, mh = 14, 3
+            mw, mh = MARKER
             blend(out, resize(marker, mw, mh), cx - mw // 2,
                   oy + dock_h - INNER + 1, tint=colour, alpha=0.95)
     return out, (ox, oy, dock_w, dock_h)

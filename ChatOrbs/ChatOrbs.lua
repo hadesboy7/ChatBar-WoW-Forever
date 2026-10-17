@@ -22,7 +22,9 @@ local DOCK_INNER = 6            -- padding between the orbs and the dock edge
 local DOCK_H     = ORB_SIZE + DOCK_INNER * 2
 local HIT_SIZE   = 24           -- clickable area per orb
 local GLOW_SIZE  = 34
-local MARKER_W, MARKER_H = 14, 3
+-- Every size here is even, so that snapping the dock to half a pixel per unit
+-- still lands each edge on a whole physical pixel.
+local MARKER_W, MARKER_H = 14, 4
 local CORNER     = 12           -- nine-slice corner, in screen pixels
 local CAPTION_SIZE = 12
 local HOVER_TIME = 0.10         -- seconds for the hover transition
@@ -683,9 +685,42 @@ do
     captionFont = captionFont or _G.STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
 end
 
+--- The interface is laid out on a grid 768 units tall, so one unit covers
+--- `scale * screenHeight / 768` physical pixels. Unless that number is whole,
+--- every edge of every texture lands between two pixels and the whole bar goes
+--- soft and ragged. Snapping the dock's own scale to a whole (or half) pixel
+--- per unit is what keeps it crisp - the same trick pixel-perfect UI addons
+--- apply to UIParent, applied to one frame so the rest of the UI is untouched.
+local function SnapScale(desired)
+    local probe = _G.GetPhysicalScreenSize
+    if type(probe) ~= "function" then return desired end
+    local ok, _, screenHeight = pcall(probe)
+    if not ok or type(screenHeight) ~= "number" or screenHeight <= 0 then
+        return desired
+    end
+    local parent = UIParent:GetEffectiveScale()
+    if type(parent) ~= "number" or parent <= 0 then return desired end
+
+    local unit = 768 / screenHeight         -- effective scale of one pixel
+    local steps = floor(desired * parent / unit * 2 + 0.5) / 2
+    if steps < 0.5 then steps = 0.5 end
+    local snapped = steps * unit / parent
+    -- A snap that changes the size wildly would be worse than soft edges.
+    if snapped < desired * 0.55 or snapped > desired * 1.8 then return desired end
+    return snapped
+end
+
+--- Re-anchors the dock to UIParent, rounded so its corner sits on a whole
+--- physical pixel. GetLeft and SetPoint offsets share the frame's own
+--- coordinate space, so no scale conversion is needed beyond the rounding.
 local function NormalizeAnchor()
     local left, bottom = dock:GetLeft(), dock:GetBottom()
     if not left or not bottom then return end
+    local effective = dock:GetEffectiveScale()
+    if type(effective) == "number" and effective > 0 then
+        left = floor(left * effective + 0.5) / effective
+        bottom = floor(bottom * effective + 0.5) / effective
+    end
     dock:ClearAllPoints()
     dock:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", left, bottom)
 end
@@ -925,15 +960,18 @@ end
 function ChatOrbs:ApplyScale(newScale)
     local point, _, relPoint, x, y = dock:GetPoint()
     local old = dock:GetScale()
-    dock:SetScale(newScale)
+    local applied = SnapScale(newScale)
+    dock:SetScale(applied)
     -- SetPoint offsets live in the frame's own scale, so they need converting
     -- for the dock to stay where it looks like it is.
     if point and x and y and old and old > 0 then
         dock:ClearAllPoints()
-        dock:SetPoint(point, UIParent, relPoint, x * old / newScale, y * old / newScale)
+        dock:SetPoint(point, UIParent, relPoint, x * old / applied, y * old / applied)
     end
+    NormalizeAnchor()
     ChatOrbsDB.scale = newScale
     self:SavePosition()
+    return applied
 end
 
 function ChatOrbs:ApplyVisibility()
@@ -1022,7 +1060,7 @@ local function HandleSlash(input)
         ChatOrbsDB.point, ChatOrbsDB.relPoint = nil, nil
         ChatOrbsDB.x, ChatOrbsDB.y = nil, nil
         ChatOrbsDB.scale = 1
-        dock:SetScale(1)
+        dock:SetScale(SnapScale(1))
         ChatOrbs:RestorePosition()
         Print(T("положение и масштаб сброшены.", "position and scale reset."))
 
@@ -1034,8 +1072,16 @@ local function HandleSlash(input)
             Print(T("масштаб должен быть от 0.5 до 3.",
                     "scale must be between 0.5 and 3."))
         else
-            ChatOrbs:ApplyScale(value)
-            Print(T("масштаб: ", "scale: ") .. value)
+            local applied = ChatOrbs:ApplyScale(value)
+            local message = T("масштаб: ", "scale: ") .. value
+            if applied and math.abs(applied - value) > 0.01 then
+                message = message
+                    .. T(" (подогнан до ", " (snapped to ")
+                    .. string.format("%.3f", applied)
+                    .. T(", чтобы края попадали на целые пиксели)",
+                         " so edges land on whole pixels)")
+            end
+            Print(message)
         end
 
     elseif command == "hide" then
@@ -1103,7 +1149,7 @@ events:SetScript("OnEvent", function(self, event, arg1)
         self:UnregisterEvent("ADDON_LOADED")
 
     elseif event == "PLAYER_LOGIN" then
-        dock:SetScale(ChatOrbsDB.scale or 1)
+        dock:SetScale(SnapScale(ChatOrbsDB.scale or 1))
         ChatOrbs:RestorePosition()
         ChatOrbs:ApplyLock()
         ChatOrbs:Rebuild()

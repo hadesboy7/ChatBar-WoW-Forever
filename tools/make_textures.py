@@ -54,95 +54,104 @@ def from_array(arr):
 
 
 # ---------------------------------------------------------------------------
-# Orb: greyscale, tinted by the chat colour
+# Orb: a shaded sphere, greyscale so SetVertexColor can tint it
 # ---------------------------------------------------------------------------
-def make_orb(size=64, ring=0.38, top=1.0, bottom=0.84, ring_width=0.13):
-    """Vertical falloff inside, a darker ring at the rim, alpha for the edge."""
+LIGHT = np.array([-0.42, -0.55, 0.72])      # upper left, tilted towards us
+LIGHT = LIGHT / np.linalg.norm(LIGHT)
+
+
+def _sphere(size):
+    """Surface normal and coverage for a unit sphere filling the tile."""
     axis = (np.arange(size) + 0.5) / size * 2.0 - 1.0
     gx, gy = np.meshgrid(axis, axis)
     r = np.sqrt(gx * gx + gy * gy)
+    z = np.sqrt(np.clip(1.0 - r * r, 0.0, 1.0))
+    lit = np.clip(gx * LIGHT[0] + gy * LIGHT[1] + z * LIGHT[2], 0.0, 1.0)
+    # One texel of feathering; the mip chain turns this into proper
+    # antialiasing at whatever size the orb is actually drawn.
+    coverage = np.clip((1.0 - r) * size / 2.0, 0.0, 1.0)
+    return r, lit, coverage
 
-    fill = top + (bottom - top) * ((gy + 1.0) / 2.0)
 
-    # Blend from the fill into the ring across a narrow band, so the rim does
-    # not alias once the 64px texture is drawn at 20px.
-    inner = 1.0 - ring_width
-    t = np.clip((r - inner) / max(ring_width * 0.55, 1e-6), 0.0, 1.0)
-    value = fill * (1.0 - t) + ring * t
+def smoothstep(edge0, edge1, x):
+    t = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
 
-    alpha = np.clip((1.0 - r) / (1.6 / (size / 2.0)), 0.0, 1.0)
+
+def make_orb(size=128, ambient=0.54, rim=0.26, outline=0.60):
+    """Diffuse ball, darkened towards the rim, with a dark outline."""
+    r, lit, coverage = _sphere(size)
+    value = ambient + (1.0 - ambient) * lit
+    value = value * (1.0 - rim * smoothstep(0.80, 1.0, r))
+    value = value * (1.0 - outline * smoothstep(0.90, 1.0, r))
 
     out = np.zeros((size, size, 4))
-    out[..., 0] = out[..., 1] = out[..., 2] = value
-    out[..., 3] = alpha
+    out[..., 0] = out[..., 1] = out[..., 2] = np.clip(value, 0.0, 1.0)
+    out[..., 3] = coverage
     return out
 
 
 # ---------------------------------------------------------------------------
-# OrbSheen: white wash over the upper half, clipped to the orb
+# OrbSheen: the specular highlight, drawn untinted over the orb
 # ---------------------------------------------------------------------------
-def make_sheen(size=64, strength=0.62):
-    layer = Image.new("RGBA", (size * SS, size * SS), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    px = size * SS
-    d.ellipse((px * 0.17, px * 0.04, px * 0.83, px * 0.47),
-              fill=(255, 255, 255, int(255 * strength)))
-    layer = layer.filter(ImageFilter.GaussianBlur(px * 0.065))
+def make_sheen(size=128, tightness=24.0, strength=0.97, gloss=0.18):
+    r, lit, coverage = _sphere(size)
+    spec = np.power(lit, tightness) * strength
+    # A faint wash over the upper half keeps the ball from looking matte.
+    spec = spec + gloss * np.power(np.clip(lit, 0.0, 1.0), 2.2)
+    spec = spec * (1.0 - smoothstep(0.88, 1.0, r))
 
-    mask = Image.new("L", (px, px), 0)
-    ImageDraw.Draw(mask).ellipse((px * 0.055, px * 0.055, px * 0.945, px * 0.945),
-                                 fill=255)
-    mask = mask.filter(ImageFilter.GaussianBlur(px * 0.012))
-    clipped = Image.new("RGBA", (px, px), (0, 0, 0, 0))
-    clipped.paste(layer, (0, 0), mask)
-
-    arr = to_array(shrink(clipped, size, size))
-    arr[..., :3] = 1.0                      # keep RGB pure white
-    return arr
+    out = np.zeros((size, size, 4))
+    out[..., :3] = 1.0
+    out[..., 3] = np.clip(spec, 0.0, 1.0) * coverage
+    return out
 
 
 # ---------------------------------------------------------------------------
-# Glow: soft halo drawn additively behind a hovered orb
+# Glow: soft radial halo drawn additively behind a hovered orb
 # ---------------------------------------------------------------------------
-def make_glow(size=64, inner=0.30, blur=0.11):
-    px = size * SS
+def make_glow(size=128, inner=0.30, blur=0.11):
+    px = size * SS // 4
     layer = Image.new("RGBA", (px, px), (0, 0, 0, 0))
     ImageDraw.Draw(layer).ellipse(
         (px * inner, px * inner, px * (1 - inner), px * (1 - inner)),
         fill=(255, 255, 255, 255))
     layer = layer.filter(ImageFilter.GaussianBlur(px * blur))
-    arr = to_array(shrink(layer, size, size))
+    arr = to_array(layer.resize((size, size), Image.LANCZOS))
     arr[..., :3] = 1.0
     return arr
 
 
 # ---------------------------------------------------------------------------
-# Panel: nine-slice rounded rectangle, dark fill with a light hairline
+# Panel: nine-slice rounded panel, dark fill with a light hairline
 # ---------------------------------------------------------------------------
-def make_panel(size=64, radius=20, fill=(13, 13, 16, 205),
-               border=(255, 255, 255, 40), border_w=2.4, sheen=(255, 255, 255, 26)):
-    px = size * SS
+def make_panel(size=128, fill=(13, 13, 16, 210),
+               border=(255, 255, 255, 46), sheen=(255, 255, 255, 28)):
+    radius = size * 0.3125                      # 40 at 128, i.e. 10 on screen
+    border_w = size / 32.0                      # a crisp hairline once scaled
+    px = size * SS // 2
+    k = px / size
     layer = Image.new("RGBA", (px, px), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
-    d.rounded_rectangle((0, 0, px - 1, px - 1), radius=radius * SS, fill=fill)
-    d.rounded_rectangle((border_w * SS / 2, border_w * SS / 2,
-                         px - 1 - border_w * SS / 2, px - 1 - border_w * SS / 2),
-                        radius=radius * SS, outline=border, width=int(border_w * SS))
-    # A hairline of light along the top edge, inside the border.
-    d.rounded_rectangle((radius * SS * 0.5, border_w * SS * 1.4,
-                         px - 1 - radius * SS * 0.5, border_w * SS * 3.2),
-                        radius=border_w * SS, fill=sheen)
-    return to_array(shrink(layer, size, size))
+    d.rounded_rectangle((0, 0, px - 1, px - 1), radius=radius * k, fill=fill)
+    d.rounded_rectangle((border_w * k / 2, border_w * k / 2,
+                         px - 1 - border_w * k / 2, px - 1 - border_w * k / 2),
+                        radius=radius * k, outline=border, width=int(border_w * k))
+    d.rounded_rectangle((radius * k * 0.5, border_w * k * 1.5,
+                         px - 1 - radius * k * 0.5, border_w * k * 3.4),
+                        radius=border_w * k, fill=sheen)
+    return to_array(layer.resize((size, size), Image.LANCZOS))
 
 
 # ---------------------------------------------------------------------------
-# Marker: small rounded pill under the active channel
+# Marker: rounded pill under the active channel
 # ---------------------------------------------------------------------------
-def make_marker(w=32, h=16):
-    layer = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
+def make_marker(w=64, h=32):
+    layer = Image.new("RGBA", (w * SS // 2, h * SS // 2), (0, 0, 0, 0))
+    k = SS // 2
     ImageDraw.Draw(layer).rounded_rectangle(
-        (0, 0, w * SS - 1, h * SS - 1), radius=h * SS / 2, fill=(255, 255, 255, 255))
-    arr = to_array(shrink(layer, w, h))
+        (0, 0, w * k - 1, h * k - 1), radius=h * k / 2, fill=(255, 255, 255, 255))
+    arr = to_array(layer.resize((w, h), Image.LANCZOS))
     arr[..., :3] = 1.0
     return arr
 

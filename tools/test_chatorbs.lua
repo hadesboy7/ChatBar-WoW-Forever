@@ -251,6 +251,10 @@ end
 
 env.SlashCmdList = {}
 env.GetLocale = function() return "ruRU" end
+-- A 1080p screen: the interface grid is 768 units tall, so one unit covers
+-- 1080/768 = 1.40625 pixels at scale 1 - not a whole number, which is exactly
+-- the case the dock has to snap away from.
+env.GetPhysicalScreenSize = function() return 1920, 1080 end
 
 env.SAY, env.YELL, env.WHISPER, env.EMOTE = "Сказать", "Крик", "Шепот", "Эмоция"
 env.PARTY, env.RAID, env.GUILD, env.OFFICER = "Группа", "Рейд", "Гильдия", "Офицерский"
@@ -556,8 +560,10 @@ check(#tooltipLines >= 2, "the tooltip has no body line")
 dock.simLeft, dock.simBottom = 310, 420
 pcall(dock.scripts.OnDragStart, dock)
 pcall(dock.scripts.OnDragStop, dock)
-check(env.ChatOrbsDB.x == 310 and env.ChatOrbsDB.y == 420,
-      "dragging did not save the position")
+check(env.ChatOrbsDB.x and math.abs(env.ChatOrbsDB.x - 310) < 1
+      and env.ChatOrbsDB.y and math.abs(env.ChatOrbsDB.y - 420) < 1,
+      "dragging saved " .. tostring(env.ChatOrbsDB.x) .. ","
+      .. tostring(env.ChatOrbsDB.y) .. ", expected about 310,420")
 
 -- State changes add and remove orbs.
 world.inGroup = true; fire("GROUP_ROSTER_UPDATE")
@@ -611,11 +617,31 @@ run("unlock");  check(env.ChatOrbsDB.locked == false, "unlock did not clear the 
 check(dock.mouse == true, "an unlocked dock does not capture the mouse")
 run("hide");    check(dock.shown == false, "hide did not hide the dock")
 run("show");    check(dock.shown == true, "show did not show the dock")
-run("scale 1.5"); check(dock.scale == 1.5, "scale 1.5 was not applied")
-run("scale 9");   check(dock.scale == 1.5, "an out-of-range scale was applied anyway")
-run("scale");     check(dock.scale == 1.5, "a bare scale query changed the scale")
+-- Scales snap to a whole or half pixel per unit, so the applied value is not
+-- the requested one; what matters is that the result lands on the grid.
+local function pixelsPerUnit(scale) return scale * 1080 / 768 end
+run("scale 1.5")
+check(math.abs(pixelsPerUnit(dock.scale) * 2 % 1) < 1e-6,
+      "scale 1.5 snapped to " .. dock.scale .. " = "
+      .. pixelsPerUnit(dock.scale) .. " px per unit, not a half-pixel step")
+check(math.abs(dock.scale - 1.5) < 0.5, "the snap moved the scale too far")
+local snapped = dock.scale
+run("scale 9");   check(dock.scale == snapped, "an out-of-range scale was applied anyway")
+run("scale");     check(dock.scale == snapped, "a bare scale query changed the scale")
 run("reset")
-check(dock.scale == 1, "reset did not restore scale 1")
+check(math.abs(pixelsPerUnit(dock.scale) * 2 % 1) < 1e-6,
+      "reset left the dock off the pixel grid at scale " .. dock.scale)
+check(math.abs(dock.scale - 1) < 0.5, "reset moved the scale too far from 1")
+check(env.ChatOrbsDB.scale == 1, "reset did not store scale 1")
+
+-- The dock's corner is rounded onto a whole physical pixel too.
+dock.simLeft, dock.simBottom = 310.37, 420.81
+pcall(dock.scripts.OnDragStart, dock)
+pcall(dock.scripts.OnDragStop, dock)
+check(math.abs(env.ChatOrbsDB.x * dock.scale % 1) < 1e-6,
+      "the saved x (" .. tostring(env.ChatOrbsDB.x) .. ") is not on a whole pixel")
+check(math.abs(env.ChatOrbsDB.y * dock.scale % 1) < 1e-6,
+      "the saved y (" .. tostring(env.ChatOrbsDB.y) .. ") is not on a whole pixel")
 check(env.ChatOrbsDB.x ~= nil, "reset did not store a fresh position")
 run("nonsense")
 

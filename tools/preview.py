@@ -156,33 +156,43 @@ def backdrop(w, h, kind):
 EMOTES = ["Привет", "Пока", "Помахать", "Поклон", "Отдатьчесть", "Спасибо",
           "Аплодисменты", "Ура", "Смех", "Улыбка", "Танец", "Мускулы",
           "Поцелуй", "Обнять", "Пожатьплечами", "Извинить", "Плакать",
-          "Рычать", "Спать", "Да", "Нет"]
-COLS, CELL_W, CELL_H, PAD = 3, 120, 20, 10
+          "Рычать", "Сесть", "Наколени", "Лечь", "Спать", "Указать",
+          "Молиться"]
+COLS, ROWS, CELL_W, CELL_H, PAD, SEARCH_H = 3, 8, 120, 20, 10, 22
 
 
 def render_picker():
     """The emote list, laid out exactly as the addon lays it out."""
     panel = read_blp("Panel")
-    rows = (len(EMOTES) + COLS - 1) // COLS
     w = COLS * CELL_W + PAD * 2
-    h = rows * CELL_H + PAD * 2
+    h = PAD * 2 + SEARCH_H + 6 + ROWS * CELL_H
     out = np.zeros((h, w, 4))
     nine_slice(out, panel, 0, 0, w, h)
 
     img = Image.fromarray(np.clip(out * 255, 0, 255).astype(np.uint8), "RGBA")
     d = ImageDraw.Draw(img)
     font = ImageFont.truetype(FONT_BOLD, 11)
-    for i, label in enumerate(EMOTES):
+
+    d.rectangle((PAD, PAD, w - PAD - 1, PAD + SEARCH_H - 1), fill=(255, 255, 255, 18))
+    d.text((PAD + 7, PAD + SEARCH_H / 2 - 7), "поиск эмоции", font=font,
+           fill=(140, 140, 153, 255))
+
+    top = PAD + SEARCH_H + 6
+    for i, label in enumerate(EMOTES[: COLS * ROWS]):
         col, row = i % COLS, i // COLS
-        x = PAD + col * CELL_W
-        y = PAD + row * CELL_H
-        if i == 10:                                  # one row shown hovered
+        x, y = PAD + col * CELL_W, top + row * CELL_H
+        if i == 18:                                  # "Сесть", shown hovered
             d.rectangle((x + 2, y, x + CELL_W - 2, y + CELL_H - 1),
                         fill=(255, 255, 255, 31))
             colour = (255, 217, 89, 255)
         else:
             colour = (224, 224, 235, 255)
         d.text((x + 8, y + CELL_H / 2 - 7), label, font=font, fill=colour)
+
+    small = ImageFont.truetype(FONT_BOLD, 10)
+    hint = "колесо — прокрутка"
+    hw = d.textbbox((0, 0), hint, font=small)[2]
+    d.text((w - PAD - 2 - hw, h - PAD - 4), hint, font=small, fill=(128, 128, 140, 255))
     return img
 
 

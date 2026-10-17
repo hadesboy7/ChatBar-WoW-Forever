@@ -104,6 +104,17 @@ local function newFrame(frameType, name, parent)
         RegisterForDrag = function(self, ...) self.drag = { ... } end,
         RegisterForClicks = function(self, ...) self.clicks = { ... } end,
         EnableMouse = function(self, v) self.mouse = v end,
+        EnableMouseWheel = function(self, v) self.wheel = v end,
+        SetAutoFocus = function(self, v) self.autoFocus = v end,
+        SetTextInsets = function() end,
+        ClearFocus = function(self) self.focused = false end,
+        SetFont = function(self, path, size)
+            check(type(path) == "string" and path ~= "", "EditBox SetFont path")
+            check(type(size) == "number" and size > 0, "EditBox SetFont size")
+            return true
+        end,
+        SetFontObject = function(self, o) self.fontObject = o end,
+        SetTextColor = function(self, cr, cg, cb) self.color = { cr, cg, cb } end,
 
         Show = function(self)
             self.shown = true
@@ -169,6 +180,17 @@ local function newFrame(frameType, name, parent)
             return t
         end,
     }
+    if frameType == "EditBox" then
+        f.SetText = function(self, t)
+            self.text = t
+            if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self) end
+        end
+        f.GetText = function(self) return self.text end
+        f.SetFocus = function(self) self.focused = true end
+        f.HighlightText = function() end
+        f.SetCursorPosition = function(self, p) self.cursor = p end
+        f.GetNumLetters = function(self) return #(self.text or "") end
+    end
     if name then env[name] = f end
     allFrames[#allFrames + 1] = f
     return f
@@ -264,7 +286,9 @@ env.SLASH_EMOTE1, env.SLASH_PARTY1, env.SLASH_RAID1 = "/e", "/p", "/raid"
 env.SLASH_GUILD1, env.SLASH_OFFICER1 = "/g", "/o"
 env.SLASH_INSTANCE_CHAT1, env.SLASH_BNWHISPER1 = "/i", "/bnwhisper"
 
--- A handful of ruRU emote globals, laid out the way the client does.
+-- ruRU emote globals laid out the way the client does. The real client knows
+-- hundreds; the point of the fixture is that the addon reads them all rather
+-- than carrying its own short list, which is how /sit went missing.
 local EMOTE_FIXTURES = {
     { "HELLO", "/привет" }, { "BYE", "/пока" }, { "WAVE", "/помахать" },
     { "BOW", "/поклон" }, { "SALUTE", "/отдатьчесть" }, { "THANK", "/спасибо" },
@@ -272,12 +296,23 @@ local EMOTE_FIXTURES = {
     { "SMILE", "/улыбка" }, { "DANCE", "/танец" }, { "FLEX", "/мускулы" },
     { "KISS", "/поцелуй" }, { "HUG", "/обнять" }, { "SHRUG", "/пожатьплечами" },
     { "SORRY", "/извинить" }, { "CRY", "/плакать" }, { "ROAR", "/рычать" },
-    { "SLEEP", "/спать" }, { "YES", "/да" }, { "NO", "/нет" },
+    { "SIT", "/сесть" }, { "KNEEL", "/наколени" }, { "LAYDOWN", "/лечь" },
+    { "SLEEP", "/спать" }, { "POINT", "/указать" }, { "PRAY", "/молиться" },
+    { "READ", "/читать" }, { "DRINK", "/пить" }, { "EAT", "/есть" },
+    { "WELCOME", "/приветствовать" }, { "CONGRATULATE", "/поздравить" },
+    { "RUDE", "/грубость" }, { "CHICKEN", "/курица" }, { "TRAIN", "/чухчух" },
+    { "VICTORY", "/победа" }, { "NO", "/нет" },
+    { "BLUSH", "/краснеть" }, { "SPIT", "/плюнуть" }, { "MOURN", "/скорбеть" },
+    { "GIGGLE", "/хихикать" }, { "BECKON", "/поманить" }, { "CHARGE", "/вперёд" },
 }
 for i, pair in ipairs(EMOTE_FIXTURES) do
     env["EMOTE" .. (i * 3) .. "_TOKEN"] = pair[1]
     env["EMOTE" .. (i * 3) .. "_CMD1"] = pair[2]
 end
+-- YES is listed with an English command first and a Russian one second, which
+-- is what put a stray "Yes" in a Russian list.
+env["EMOTE500_TOKEN"], env["EMOTE500_CMD1"], env["EMOTE500_CMD2"] =
+    "YES", "/yes", "/да"
 
 local emotesPerformed = {}
 env.DoEmote = function(token) emotesPerformed[#emotesPerformed + 1] = token end
@@ -497,21 +532,83 @@ local cells = {}
 for _, f in ipairs(allFrames) do
     if f.parent == pickerFrame and f.scripts.OnClick then cells[#cells + 1] = f end
 end
-check(#cells == 21, "the picker has " .. #cells .. " emotes, expected 21")
-local labels = {}
-for _, c in ipairs(cells) do
-    for _, r in ipairs(c.regions) do
-        if r.kind == "FontString" then labels[#labels + 1] = r.text end
+check(#cells == 24, "the picker has " .. #cells .. " cells, expected 24")
+
+local function cellText(cell)
+    for _, r in ipairs(cell.regions) do
+        if r.kind == "FontString" then return r.text end
     end
 end
+local function visibleLabels()
+    local out = {}
+    for _, c in ipairs(cells) do
+        if c.shown then out[#out + 1] = cellText(c) end
+    end
+    return out
+end
+
+local labels = visibleLabels()
 check(labels[1] == "Привет", "first emote label is '" .. tostring(labels[1])
       .. "', expected 'Привет' (Cyrillic uppercasing)")
 check(labels[11] == "Танец", "eleventh emote label is '" .. tostring(labels[11]) .. "'")
+
+-- The search box: the mock types into it the way a player would.
+local search = pickerFrame.search
+check(search ~= nil, "the picker has no search box")
+check(search.autoFocus == false,
+      "the search box grabs focus on open, which would eat the movement keys")
+
+local function typeSearch(text)
+    search.text = text
+    local ok, e = pcall(search.scripts.OnTextChanged, search)
+    check(ok, "typing '" .. text .. "' errored: " .. tostring(e))
+end
+
+-- /sit is the emote that was missing. It must be findable by its Russian name,
+-- in any case, and by its English token.
+typeSearch("сесть")
+check(visibleLabels()[1] == "Сесть",
+      "searching 'сесть' gave '" .. tostring(visibleLabels()[1]) .. "'")
+typeSearch("СЕСТЬ")
+check(visibleLabels()[1] == "Сесть", "the search is not case-blind for Cyrillic")
+typeSearch("sit")
+check(visibleLabels()[1] == "Сесть", "searching by the English token failed")
+pcall(search.scripts.OnEnterPressed, search)
+check(emotesPerformed[#emotesPerformed] == "SIT",
+      "Enter in the search box performed '"
+      .. tostring(emotesPerformed[#emotesPerformed]) .. "', expected SIT")
+check(not pickerFrame.shown, "the picker stayed open after Enter")
+
+click(3)
+typeSearch("щщщ")
+check(#visibleLabels() == 0, "a search with no matches still showed cells")
+check(pickerFrame.empty.shown, "the empty-list notice did not appear")
+typeSearch("")
+check(#visibleLabels() == 24, "clearing the search did not restore the full list")
+
+-- Every emote the client knows is reachable, not just a hardcoded handful.
+local reachable = {}
+for _ = 1, 40 do
+    for _, label in ipairs(visibleLabels()) do reachable[label] = true end
+    pcall(pickerFrame.scripts.OnMouseWheel, pickerFrame, -1)
+end
+local count = 0
+for _ in pairs(reachable) do count = count + 1 end
+check(count >= #EMOTE_FIXTURES,
+      "only " .. count .. " emotes were reachable by scrolling, expected at least "
+      .. #EMOTE_FIXTURES)
+check(reachable["Да"] == true,
+      "YES shows as the English '/yes' instead of the Russian command")
+check(reachable["Yes"] ~= true, "a stray English 'Yes' is still in the list")
+
+pcall(pickerFrame.scripts.OnMouseWheel, pickerFrame, 40)   -- back to the top
+check(visibleLabels()[1] == "Привет", "scrolling back up did not restore the top")
 pcall(cells[11].scripts.OnEnter, cells[11])
 pcall(cells[11].scripts.OnLeave, cells[11])
 pcall(cells[11].scripts.OnClick, cells[11])
-check(emotesPerformed[1] == "DANCE",
-      "clicking an emote performed '" .. tostring(emotesPerformed[1]) .. "'")
+check(emotesPerformed[#emotesPerformed] == "DANCE",
+      "clicking an emote performed '"
+      .. tostring(emotesPerformed[#emotesPerformed]) .. "'")
 check(not pickerFrame.shown, "the picker stayed open after an emote was chosen")
 
 -- Right-clicking the emote orb opens the edit box instead.

@@ -93,9 +93,44 @@ local function UpperChar(c)
     return c
 end
 
+--- Lowercases one character, Cyrillic included, for case-blind searching.
+local function LowerChar(c)
+    if #c == 1 then return strlower(c) end
+    if #c == 2 then
+        local b1, b2 = strbyte(c, 1, 2)
+        if b1 == 0xD0 and b2 >= 0x90 and b2 <= 0x9F then         -- А..П
+            return strchar(b1, b2 + 0x20)
+        elseif b1 == 0xD0 and b2 >= 0xA0 and b2 <= 0xAF then     -- Р..Я
+            return strchar(0xD1, b2 - 0x20)
+        elseif b1 == 0xD0 and b2 == 0x81 then                    -- Ё
+            return strchar(0xD1, 0x91)
+        end
+    end
+    return c
+end
+
+local function LowerText(s)
+    if type(s) ~= "string" then return "" end
+    local out, i = {}, 1
+    while i <= #s do
+        local n = CharLen(s, i)
+        out[#out + 1] = LowerChar(strsub(s, i, i + n - 1))
+        i = i + n
+    end
+    return table.concat(out)
+end
+
 local function FirstChar(s)
     if type(s) ~= "string" or s == "" then return "?" end
     return UpperChar(strsub(s, 1, CharLen(s, 1)))
+end
+
+local function SetSolid(texture, r, g, b, a)
+    if texture.SetColorTexture then
+        texture:SetColorTexture(r, g, b, a)
+    else
+        texture:SetTexture(r, g, b, a)
+    end
 end
 
 local function UpperFirst(s)
@@ -522,47 +557,146 @@ end
 -- ---------------------------------------------------------------------------
 -- Emotes
 -- ---------------------------------------------------------------------------
-local EMOTE_TOKENS = {
+-- Emotes the list puts first. Everything the client knows follows them, so a
+-- token missing here is still reachable; it just is not pinned to the top.
+local EMOTE_FAVOURITES = {
     "HELLO", "BYE", "WAVE", "BOW", "SALUTE", "THANK",
     "APPLAUD", "CHEER", "LAUGH", "SMILE", "DANCE", "FLEX",
     "KISS", "HUG", "SHRUG", "SORRY", "CRY", "ROAR",
-    "SLEEP", "YES", "NO",
+    "SIT", "KNEEL", "LAYDOWN", "SLEEP", "POINT", "PRAY",
+    "READ", "DRINK", "EAT", "WELCOME", "CONGRATULATE", "RUDE",
+    "CHICKEN", "TRAIN", "VICTORY", "YES", "NO",
 }
 
 local emoteList
 
-local function BuildEmoteList()
-    if emoteList then return emoteList end
-    local commands = {}
-    for i = 1, 600 do
-        local token = _G["EMOTE" .. i .. "_TOKEN"]
-        if type(token) == "string" and not commands[token] then
-            local cmd = _G["EMOTE" .. i .. "_CMD1"]
-            if type(cmd) == "string" and cmd ~= "" then
-                commands[token] = cmd
+--- The visible name of an emote, taken from the client's own slash commands.
+local function EmoteLabel(index, token)
+    local best
+    for n = 1, 4 do
+        local cmd = _G["EMOTE" .. index .. "_CMD" .. n]
+        if type(cmd) == "string" and cmd ~= "" then
+            local text = (cmd:gsub("^/", ""))
+            if text ~= "" then
+                if not best then best = text end
+                -- The ruRU client lists both "/yes" and a Russian spelling for
+                -- some emotes; an English word in the middle of a Russian list
+                -- reads like a bug, so prefer the Cyrillic one.
+                local lead = strbyte(text, 1)
+                if isRU and lead and lead >= 0xC0 then return UpperFirst(text) end
             end
         end
     end
+    return UpperFirst(best or strlower(token))
+end
+
+--- Every emote the client knows: the favourites first, then the rest in
+--- alphabetical order. Hardcoding a short list is what hid /sit, so the list
+--- is now read out of the client instead of being written down here.
+local function BuildEmoteList()
+    if emoteList then return emoteList end
+
+    local byToken, found = {}, {}
+    for i = 1, 1000 do
+        local token = _G["EMOTE" .. i .. "_TOKEN"]
+        if type(token) == "string" and token ~= "" and not byToken[token] then
+            local label = EmoteLabel(i, token)
+            local entry = {
+                token = token,
+                label = label,
+                search = LowerText(label) .. " " .. strlower(token),
+            }
+            byToken[token] = entry
+            found[#found + 1] = entry
+        end
+    end
+
     emoteList = {}
-    for _, token in ipairs(EMOTE_TOKENS) do
-        local cmd = commands[token]
-        local label = cmd and UpperFirst((cmd:gsub("^/", ""))) or UpperFirst(strlower(token))
-        emoteList[#emoteList + 1] = { token = token, label = label }
+    local used = {}
+    for _, token in ipairs(EMOTE_FAVOURITES) do
+        local entry = byToken[token]
+        if entry and not used[entry] then
+            used[entry] = true
+            emoteList[#emoteList + 1] = entry
+        end
+    end
+
+    local rest = {}
+    for _, entry in ipairs(found) do
+        if not used[entry] then rest[#rest + 1] = entry end
+    end
+    table.sort(rest, function(a, b) return a.search < b.search end)
+    for _, entry in ipairs(rest) do emoteList[#emoteList + 1] = entry end
+
+    -- A client with no emote globals at all still gets a usable list.
+    if #emoteList == 0 then
+        for _, token in ipairs(EMOTE_FAVOURITES) do
+            local label = UpperFirst(strlower(token))
+            emoteList[#emoteList + 1] = {
+                token = token, label = label, search = LowerText(label),
+            }
+        end
     end
     return emoteList
 end
 
-local EMOTE_COLS, EMOTE_CELL_W, EMOTE_CELL_H, EMOTE_PAD = 3, 120, 20, 10
+local EMOTE_COLS, EMOTE_ROWS = 3, 8
+local EMOTE_CELL_W, EMOTE_CELL_H, EMOTE_PAD, EMOTE_SEARCH_H = 120, 20, 10, 22
+
 local picker, pickerBlocker
+local pickerCells, pickerMatches, pickerOffset = {}, {}, 0
 
 local function HidePicker()
     if picker then picker:Hide() end
 end
 
+local function PickerMaxOffset()
+    return max(0, math.ceil(#pickerMatches / EMOTE_COLS) - EMOTE_ROWS)
+end
+
+local function RefreshPicker()
+    if not picker then return end
+    local limit = PickerMaxOffset()
+    if pickerOffset > limit then pickerOffset = limit end
+    if pickerOffset < 0 then pickerOffset = 0 end
+
+    for index, cell in ipairs(pickerCells) do
+        local entry = pickerMatches[pickerOffset * EMOTE_COLS + index]
+        cell.entry = entry
+        if entry then
+            cell.text:SetText(entry.label)
+            cell.text:SetTextColor(0.88, 0.88, 0.92)
+            cell:Show()
+        else
+            cell:Hide()
+        end
+    end
+
+    if #pickerMatches == 0 then picker.empty:Show() else picker.empty:Hide() end
+    if limit > 0 then picker.more:Show() else picker.more:Hide() end
+end
+
+local function FilterPicker(query)
+    local all = BuildEmoteList()
+    pickerMatches = {}
+    query = LowerText(strtrim(query or ""))
+    for _, entry in ipairs(all) do
+        if query == "" or entry.search:find(query, 1, true) then
+            pickerMatches[#pickerMatches + 1] = entry
+        end
+    end
+    pickerOffset = 0
+    RefreshPicker()
+end
+
+local function PerformEmote(entry)
+    if not entry then return end
+    HidePicker()
+    if type(_G.DoEmote) == "function" then pcall(DoEmote, entry.token) end
+end
+
 local function CreatePicker()
     if picker then return picker end
-    local list = BuildEmoteList()
-    local rows = math.ceil(#list / EMOTE_COLS)
 
     pickerBlocker = CreateFrame("Button", nil, UIParent)
     pickerBlocker:SetAllPoints(UIParent)
@@ -573,41 +707,77 @@ local function CreatePicker()
     picker = CreateFrame("Frame", "ChatOrbsEmotePicker", UIParent)
     picker:SetFrameStrata("DIALOG")
     picker:SetWidth(EMOTE_COLS * EMOTE_CELL_W + EMOTE_PAD * 2)
-    picker:SetHeight(rows * EMOTE_CELL_H + EMOTE_PAD * 2)
+    picker:SetHeight(EMOTE_PAD * 2 + EMOTE_SEARCH_H + 6 + EMOTE_ROWS * EMOTE_CELL_H)
     picker:EnableMouse(true)
+    picker:EnableMouseWheel(true)
     picker:Hide()
-    picker:SetScript("OnShow", function() pickerBlocker:Show() end)
-    picker:SetScript("OnHide", function() pickerBlocker:Hide() end)
 
     picker.panel = CreatePanel(picker)
     picker.panel:SetAllPoints(picker)
     picker.panel:Restyle(ChatOrbsDB and ChatOrbsDB.flat)
 
-    local font = _G.GameFontNormal
     local fontPath, fontFlags
-    if font and font.GetFont then
-        local path, _, flags = font:GetFont()
+    local source = _G.GameFontNormal
+    if source and source.GetFont then
+        local path, _, flags = source:GetFont()
         fontPath, fontFlags = path, flags
     end
     fontPath = fontPath or _G.STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
 
-    for index, emote in ipairs(list) do
+    local search = CreateFrame("EditBox", nil, picker)
+    search:SetHeight(EMOTE_SEARCH_H)
+    search:SetPoint("TOPLEFT", picker, "TOPLEFT", EMOTE_PAD, -EMOTE_PAD)
+    search:SetPoint("TOPRIGHT", picker, "TOPRIGHT", -EMOTE_PAD, -EMOTE_PAD)
+    search:SetAutoFocus(false)
+    search:SetTextInsets(7, 7, 0, 0)
+    if not search:SetFont(fontPath, 11, fontFlags) then
+        search:SetFontObject("GameFontHighlightSmall")
+    end
+    search:SetTextColor(1, 1, 1)
+    local searchBg = search:CreateTexture(nil, "BACKGROUND")
+    searchBg:SetAllPoints(search)
+    SetSolid(searchBg, 1, 1, 1, 0.07)
+    picker.search = search
+
+    local hint = search:CreateFontString(nil, "OVERLAY")
+    if not hint:SetFont(fontPath, 11, fontFlags) then
+        hint:SetFontObject("GameFontDisableSmall")
+    end
+    hint:SetPoint("LEFT", search, "LEFT", 7, 0)
+    hint:SetText(T("поиск эмоции", "search emotes"))
+    hint:SetTextColor(0.55, 0.55, 0.6)
+
+    search:SetScript("OnTextChanged", function(self)
+        local text = self:GetText() or ""
+        if text == "" then hint:Show() else hint:Hide() end
+        FilterPicker(text)
+    end)
+    search:SetScript("OnEscapePressed", function(self)
+        if (self:GetText() or "") ~= "" then
+            self:SetText("")
+            self:ClearFocus()
+        else
+            HidePicker()
+        end
+    end)
+    search:SetScript("OnEnterPressed", function()
+        PerformEmote(pickerMatches[1])
+    end)
+
+    local gridTop = EMOTE_PAD + EMOTE_SEARCH_H + 6
+    for index = 1, EMOTE_COLS * EMOTE_ROWS do
         local col = (index - 1) % EMOTE_COLS
         local row = floor((index - 1) / EMOTE_COLS)
         local cell = CreateFrame("Button", nil, picker)
         cell:SetWidth(EMOTE_CELL_W)
         cell:SetHeight(EMOTE_CELL_H)
         cell:SetPoint("TOPLEFT", picker, "TOPLEFT",
-                      EMOTE_PAD + col * EMOTE_CELL_W, -(EMOTE_PAD + row * EMOTE_CELL_H))
+                      EMOTE_PAD + col * EMOTE_CELL_W, -(gridTop + row * EMOTE_CELL_H))
 
         local highlight = cell:CreateTexture(nil, "HIGHLIGHT")
         highlight:SetPoint("TOPLEFT", 2, 0)
         highlight:SetPoint("BOTTOMRIGHT", -2, 0)
-        if highlight.SetColorTexture then
-            highlight:SetColorTexture(1, 1, 1, 0.12)
-        else
-            highlight:SetTexture(1, 1, 1, 0.12)
-        end
+        SetSolid(highlight, 1, 1, 1, 0.12)
 
         local text = cell:CreateFontString(nil, "OVERLAY")
         if not text:SetFont(fontPath, 11, fontFlags) then
@@ -619,16 +789,47 @@ local function CreatePicker()
         -- A long localised name is cut off rather than spilling into the
         -- neighbouring column.
         if text.SetWordWrap then pcall(text.SetWordWrap, text, false) end
-        text:SetText(emote.label)
         text:SetTextColor(0.88, 0.88, 0.92)
+        cell.text = text
 
-        cell:SetScript("OnEnter", function() text:SetTextColor(1, 0.85, 0.35) end)
-        cell:SetScript("OnLeave", function() text:SetTextColor(0.88, 0.88, 0.92) end)
-        cell:SetScript("OnClick", function()
-            HidePicker()
-            if type(_G.DoEmote) == "function" then pcall(DoEmote, emote.token) end
-        end)
+        cell:SetScript("OnEnter", function(self) self.text:SetTextColor(1, 0.85, 0.35) end)
+        cell:SetScript("OnLeave", function(self) self.text:SetTextColor(0.88, 0.88, 0.92) end)
+        cell:SetScript("OnClick", function(self) PerformEmote(self.entry) end)
+        pickerCells[index] = cell
     end
+
+    picker.empty = picker:CreateFontString(nil, "OVERLAY")
+    if not picker.empty:SetFont(fontPath, 11, fontFlags) then
+        picker.empty:SetFontObject("GameFontDisableSmall")
+    end
+    picker.empty:SetPoint("TOPLEFT", picker, "TOPLEFT", EMOTE_PAD + 8, -(gridTop + 4))
+    picker.empty:SetText(T("ничего не найдено", "nothing found"))
+    picker.empty:SetTextColor(0.6, 0.6, 0.65)
+    picker.empty:Hide()
+
+    picker.more = picker:CreateFontString(nil, "OVERLAY")
+    if not picker.more:SetFont(fontPath, 10, fontFlags) then
+        picker.more:SetFontObject("GameFontDisableSmall")
+    end
+    picker.more:SetPoint("BOTTOMRIGHT", picker, "BOTTOMRIGHT", -EMOTE_PAD - 2, 3)
+    picker.more:SetText(T("колесо — прокрутка", "scroll for more"))
+    picker.more:SetTextColor(0.5, 0.5, 0.55)
+    picker.more:Hide()
+
+    picker:SetScript("OnMouseWheel", function(self, delta)
+        pickerOffset = pickerOffset - (delta or 0)
+        RefreshPicker()
+    end)
+    picker:SetScript("OnShow", function()
+        pickerBlocker:Show()
+        search:SetText("")
+        hint:Show()
+        FilterPicker("")
+    end)
+    picker:SetScript("OnHide", function()
+        pickerBlocker:Hide()
+        search:ClearFocus()
+    end)
 
     if type(_G.UISpecialFrames) == "table" then
         tinsert(UISpecialFrames, "ChatOrbsEmotePicker")
